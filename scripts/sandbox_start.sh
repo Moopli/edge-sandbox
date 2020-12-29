@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 #
 # Copyright SecureKey Technologies Inc. All Rights Reserved.
 #
@@ -14,6 +15,7 @@ mysqlUser=root
 mysqlPassword=secret
 
 couchdbHealthCheckURL=http://$couchdbUser:$couchdbPassword@shared.couchdb:5984
+sidetreePeer=https://sidetree-mock.trustbloc.local/sidetree/0.0.1/identifiers
 sidetreeDiscovery=https://testnet.trustbloc.local/.well-known/did-trustbloc/testnet.trustbloc.local.json
 edvHealthCheckURL=https://edv-oathkeeper-proxy.trustbloc.local/healthcheck
 resolverHealthCheckURL=https://did-resolver.trustbloc.local/1.0/identifiers/did:elem:EiAS3mqC4OLMKOwcz3ItIL7XfWduPT7q3Fa4vHgiCfSG2A
@@ -139,6 +141,7 @@ echo "#### Step 1 is complete"
 ### Step 2
 echo "#### Step 2 start demo sidetree"
 (cd test/bdd/fixtures/demo; (docker-compose -f docker-compose-sidetree-mock.yml down && docker-compose -f docker-compose-sidetree-mock.yml up --force-recreate) > docker.log 2>&1 & )
+healthCheck sidetree-peer $sidetreePeer 404
 generateDIDMethodConfigMock
 (cd test/bdd/fixtures/demo; (docker-compose -f docker-compose-sidetree-mock-discovery.yml down && docker-compose -f docker-compose-sidetree-mock-discovery.yml up --force-recreate) > docker.log 2>&1 & )
 healthCheck sidetree-discovery $sidetreeDiscovery 200
