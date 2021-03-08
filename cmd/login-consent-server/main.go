@@ -48,6 +48,8 @@ const (
 
 	loginTypeCookie = "loginType"
 
+	sessionCookie = "session"
+
 	timeout = 10 * time.Second
 )
 
@@ -180,6 +182,20 @@ func (c *consentServer) login(w http.ResponseWriter, req *http.Request) {
 			"login_challenge": challenge,
 		}
 
+		cookie, err := req.Cookie(sessionCookie)
+		if err != nil && !errors.Is(err, http.ErrNoCookie) {
+			fmt.Fprintf(w, "failed to read session cookie: %s", err.Error())
+
+			return
+		}
+
+		if err == nil {
+			c.autoAcceptLoginRequest(w, req, cookie.Value, challenge)
+
+			return
+		}
+
+		// err is http.ErrNoCookie: no active session found
 		switch {
 		case strings.Contains(req.Referer(), bankLogin):
 			expire := time.Now().AddDate(0, 0, 1)
@@ -229,10 +245,40 @@ func (c *consentServer) login(w http.ResponseWriter, req *http.Request) {
 
 func (c *consentServer) consent(w http.ResponseWriter, req *http.Request) {
 	switch req.Method {
-	case "GET":
+	case http.MethodGet:
+		autoAcceptHosts := []string{
+			"issuer.trustbloc.local",
+		}
+
+		getConsentRequest := admin.NewGetConsentRequestParamsWithHTTPClient(c.httpClient)
+		getConsentRequest.SetTimeout(timeout)
+		getConsentRequest.ConsentChallenge = req.URL.Query().Get("consent_challenge")
+
+		getConsentRequestResponse, err := c.hydraClient.Admin.GetConsentRequest(getConsentRequest)
+		if err != nil {
+			fmt.Fprint(w, err.Error())
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return
+		}
+
+		autoAccept, err := autoAllowedHost(autoAcceptHosts, getConsentRequestResponse.Payload.Client.RedirectUris)
+		if err != nil {
+			fmt.Fprintf(w, "failed to determine if I can auto-approve consent request: %s", err.Error())
+			w.WriteHeader(http.StatusInternalServerError)
+
+			return
+		}
+
+		if autoAccept {
+			c.autoAcceptConsentRequest(w, req, getConsentRequestResponse)
+
+			return
+		}
+
 		c.showConsentPage(w, req)
 		return
-	case "POST":
+	case http.MethodPost:
 		ok := parseRequestForm(w, req)
 		if !ok {
 			return
@@ -296,6 +342,46 @@ func (c *consentServer) acceptLoginRequest(w http.ResponseWriter, req *http.Requ
 
 	b := &models.AcceptLoginRequest{
 		Subject: &username[0],
+	}
+
+	loginOKRequest.SetBody(b)
+	loginOKRequest.SetTimeout(timeout)
+	loginOKRequest.LoginChallenge = resp.Payload.Challenge
+
+	loginOKResponse, err := c.hydraClient.Admin.AcceptLoginRequest(loginOKRequest)
+	if err != nil {
+		fmt.Fprint(w, err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+
+		return
+	}
+
+	http.SetCookie(w, &http.Cookie{
+		Name:       sessionCookie,
+		Value:      username[0],
+		Expires:    time.Now().AddDate(0, 0, 1),
+	})
+
+	http.Redirect(w, req, loginOKResponse.Payload.RedirectTo, http.StatusFound)
+}
+
+func (c *consentServer) autoAcceptLoginRequest(w http.ResponseWriter, req *http.Request, username, challenge string) {
+	loginRqstParams := admin.NewGetLoginRequestParamsWithHTTPClient(c.httpClient)
+	loginRqstParams.SetTimeout(timeout)
+	loginRqstParams.LoginChallenge = challenge
+
+	resp, err := c.hydraClient.Admin.GetLoginRequest(loginRqstParams)
+	if err != nil {
+		fmt.Fprint(w, err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+
+		return
+	}
+
+	loginOKRequest := admin.NewAcceptLoginRequestParamsWithHTTPClient(c.httpClient)
+
+	b := &models.AcceptLoginRequest{
+		Subject: &username,
 	}
 
 	loginOKRequest.SetBody(b)
@@ -405,6 +491,30 @@ func (c *consentServer) acceptConsentRequest(w http.ResponseWriter, req *http.Re
 	http.Redirect(w, req, consentOKResponse.Payload.RedirectTo, http.StatusFound)
 }
 
+func (c *consentServer) autoAcceptConsentRequest(w http.ResponseWriter, req *http.Request, consentRequest *admin.GetConsentRequestOK) {
+	b := &models.AcceptConsentRequest{
+		GrantScope:               consentRequest.Payload.RequestedScope,
+		GrantAccessTokenAudience: consentRequest.Payload.RequestedAccessTokenAudience,
+		Remember:                 true,
+		HandledAt:                strfmt.DateTime(time.Now()),
+	}
+
+	consentOKRequest := admin.NewAcceptConsentRequestParamsWithHTTPClient(c.httpClient)
+	consentOKRequest.SetBody(b)
+	consentOKRequest.SetTimeout(timeout)
+	consentOKRequest.ConsentChallenge = req.URL.Query().Get("consent_challenge")
+
+	consentOKResponse, err := c.hydraClient.Admin.AcceptConsentRequest(consentOKRequest)
+	if err != nil {
+		fmt.Fprint(w, err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+
+		return
+	}
+
+	http.Redirect(w, req, consentOKResponse.Payload.RedirectTo, http.StatusFound)
+}
+
 func (c *consentServer) rejectConsentRequest(w http.ResponseWriter, req *http.Request) {
 	consentDeniedRequest := admin.NewRejectConsentRequestParamsWithHTTPClient(c.httpClient)
 
@@ -446,4 +556,21 @@ func parseRequestForm(w http.ResponseWriter, req *http.Request) bool {
 	}
 
 	return true
+}
+
+func autoAllowedHost(hosts, redirectURIs []string) (bool, error) {
+	for i := range redirectURIs {
+		redirect, err := url.Parse(redirectURIs[i])
+		if err != nil {
+			return false, fmt.Errorf("autoAllowedHost: [%s] is not a URL: %w", redirectURIs[i], err)
+		}
+
+		for j := range hosts {
+			if redirect.Host == hosts[j] {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
 }
