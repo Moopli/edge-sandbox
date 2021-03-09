@@ -6,7 +6,7 @@
 
 
 # Release Parameters
-BASE_VERSION=0.1.6
+BASE_VERSION=0.1.7
 IS_RELEASE=false
 
 SOURCE_REPO=sandbox
